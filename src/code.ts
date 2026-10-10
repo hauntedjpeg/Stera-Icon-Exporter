@@ -17,6 +17,7 @@ interface IconVariant {
 interface IconData {
   name: string;
   tags: string[];
+  categories: string[];
   variants: IconVariant[];
 }
 
@@ -65,11 +66,18 @@ const YIELD_FREQUENCY = 5;
 
 const NAME_SEPARATORS = ['/', '=', ' - '];
 
+const MAX_CATEGORIES = 3;
+const CATEGORY_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
 // Pre-check metadata
 const PRE_CHECK_METADATA = {
   duplicateNames: {
     checkId: 'duplicateNames',
     label: 'Checking for duplicate names...'
+  },
+  categories: {
+    checkId: 'categories',
+    label: 'Checking categories...'
   },
   layerNames: {
     checkId: 'layerNames',
@@ -292,6 +300,79 @@ function processTags(tagsString: string): string[] {
     .filter(tag => tag.length > 0)
     .filter((tag, index, array) => array.indexOf(tag) === index) // Remove duplicates
     .sort(); // Sort alphabetically
+}
+
+/**
+ * Splits a description into its leading [category, ...] list and the remaining tag string.
+ * Category order is preserved because the first one is the primary.
+ */
+function parseDescription(description: string): { categories: string[]; tagsString: string } {
+  const trimmed = (description || '').trim();
+  const closeIndex = trimmed.indexOf(']');
+
+  if (!trimmed.startsWith('[') || closeIndex === -1) {
+    return { categories: [], tagsString: trimmed };
+  }
+
+  const categories = trimmed
+    .slice(1, closeIndex)
+    .split(',')
+    .map(category => category.trim().toLowerCase())
+    .filter(category => category.length > 0);
+
+  return { categories, tagsString: trimmed.slice(closeIndex + 1).trim() };
+}
+
+/**
+ * Validates the category syntax of a description.
+ * Returns a short description of the first problem found, or null if valid.
+ */
+function findCategoryProblem(description: string): string | null {
+  const trimmed = (description || '').trim();
+  const hasBracket = (value: string) => value.includes('[') || value.includes(']');
+
+  if (!trimmed.startsWith('[')) {
+    return hasBracket(trimmed) ? 'brackets must be at the very start' : null;
+  }
+
+  const closeIndex = trimmed.indexOf(']');
+  if (closeIndex === -1) {
+    return 'missing closing ]';
+  }
+
+  const inner = trimmed.slice(1, closeIndex);
+  if (hasBracket(inner) || hasBracket(trimmed.slice(closeIndex + 1))) {
+    return 'brackets must be at the very start';
+  }
+
+  // Validate the raw values (before lowercasing) so uppercase is reported
+  const rawCategories = inner
+    .split(',')
+    .map(category => category.trim())
+    .filter(category => category.length > 0);
+
+  if (rawCategories.length === 0) {
+    return 'empty category list';
+  }
+  if (rawCategories.length > MAX_CATEGORIES) {
+    return `more than ${MAX_CATEGORIES} categories`;
+  }
+
+  const seen = new Set<string>();
+  for (const category of rawCategories) {
+    const key = category.toLowerCase();
+    if (seen.has(key)) {
+      return `duplicate category "${category}"`;
+    }
+    seen.add(key);
+  }
+
+  const invalid = rawCategories.find(category => !CATEGORY_PATTERN.test(category));
+  if (invalid) {
+    return `"${invalid}" is not lowercase kebab-case`;
+  }
+
+  return null;
 }
 
 /**
@@ -559,6 +640,42 @@ function getComponentsFromPage(page: PageNode): { components: ComponentNode[], c
 }
 
 /**
+ * Gets the description for an icon from its first component, falling back to
+ * the parent component set.
+ */
+function getIconDescription(firstComponent: ComponentNode): string {
+  // Convert markdown to plain text (remove markdown syntax)
+  const markdownToPlainText = (markdownDesc: string): string => markdownDesc
+    .replace(/\*\*(.*?)\*\*/g, '$1') // Remove bold **text**
+    .replace(/\*(.*?)\*/g, '$1')     // Remove italic *text*
+    .replace(/`(.*?)`/g, '$1')       // Remove code `text`
+    .replace(/#{1,6}\s*/g, '')       // Remove headers # ## ###
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // Remove links [text](url)
+    .replace(/\n/g, ', ')            // Replace newlines with commas
+    .trim();
+
+  // Note: There's a known bug in Figma where description field may appear missing
+  // until nodes are re-published. We'll try both plain text and markdown versions.
+  if ((firstComponent as any).description) {
+    return (firstComponent as any).description;
+  }
+  if ((firstComponent as any).descriptionMarkdown) {
+    return markdownToPlainText((firstComponent as any).descriptionMarkdown);
+  }
+  // Fallback: Check parent component set description (for component sets)
+  if (firstComponent.parent && firstComponent.parent.type === 'COMPONENT_SET') {
+    const componentSet = firstComponent.parent;
+    if ((componentSet as any).description) {
+      return (componentSet as any).description;
+    }
+    if ((componentSet as any).descriptionMarkdown) {
+      return markdownToPlainText((componentSet as any).descriptionMarkdown);
+    }
+  }
+  return '';
+}
+
+/**
  * Groups components by their base name for processing individual components
  */
 function groupComponentsByBaseName(components: ComponentNode[]): { [baseName: string]: ComponentNode[] } {
@@ -631,6 +748,54 @@ function runDuplicateNamesCheck(
     label: 'Duplicate names detected',
     passed: false,
     message: errorMessage
+  };
+}
+
+/**
+ * Pre-check: Verifies the leading [category, ...] list in each icon description is well-formed
+ */
+function runCategoriesCheck(componentSets: any[], individualComponents: ComponentNode[]): PreCheckResult {
+  const offending: Array<{ name: string; id: string }> = [];
+  const MAX_ERRORS = 10;
+
+  const checkIcon = (baseName: string, firstComponent: ComponentNode | undefined, nodeId: string) => {
+    if (!firstComponent) return;
+    const problem = findCategoryProblem(getIconDescription(firstComponent));
+    if (problem) {
+      offending.push({ name: `${baseName}: ${problem}`, id: nodeId });
+    }
+  };
+
+  // Same icons, and same first component, that the export reads descriptions from
+  for (const componentSet of componentSets) {
+    const firstComponent = 'children' in componentSet
+      ? componentSet.children.find((child: any) => child.type === 'COMPONENT')
+      : undefined;
+    checkIcon((componentSet as any).name, firstComponent, (componentSet as any).id);
+  }
+
+  for (const [baseName, group] of Object.entries(groupComponentsByBaseName(individualComponents))) {
+    checkIcon(baseName, group[0], (group[0] as any).id);
+  }
+
+  if (offending.length === 0) {
+    return {
+      checkId: PRE_CHECK_METADATA.categories.checkId,
+      label: 'Categories valid',
+      passed: true
+    };
+  }
+
+  const offendingComponents = offending.slice(0, MAX_ERRORS);
+  const moreCount = offending.length > MAX_ERRORS ? `(and ${offending.length - MAX_ERRORS} more)` : '';
+  const errorMessage = `Descriptions may start with up to ${MAX_CATEGORIES} lowercase kebab-case categories in [brackets]. Component sets with errors: ${offendingComponents.map(({ name }) => name).join(', ')}${moreCount ? ' ' + moreCount : ''}`;
+
+  return {
+    checkId: PRE_CHECK_METADATA.categories.checkId,
+    label: 'Invalid categories detected',
+    passed: false,
+    message: errorMessage,
+    offendingComponents
   };
 }
 
@@ -916,49 +1081,10 @@ async function processIconGroup(baseName: string, components: ComponentNode[]): 
   // Get tags from the first component (they should be the same for all variants)
   const firstComponent = components[0];
   
-  // Get description using official Figma Plugin API
-  // Note: There's a known bug in Figma where description field may appear missing
-  // until nodes are re-published. We'll try both plain text and markdown versions.
-  let description = '';
-  
-  // Primary method: Use official description property (plain text)
-  if ((firstComponent as any).description) {
-    description = (firstComponent as any).description;
-  }
-  // Fallback: Try descriptionMarkdown (rich text with markdown)
-  else if ((firstComponent as any).descriptionMarkdown) {
-    // Convert markdown to plain text for tags (remove markdown syntax)
-    const markdownDesc = (firstComponent as any).descriptionMarkdown;
-    description = markdownDesc
-      .replace(/\*\*(.*?)\*\*/g, '$1') // Remove bold **text**
-      .replace(/\*(.*?)\*/g, '$1')     // Remove italic *text*
-      .replace(/`(.*?)`/g, '$1')       // Remove code `text`
-      .replace(/#{1,6}\s*/g, '')       // Remove headers # ## ###
-      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // Remove links [text](url)
-      .replace(/\n/g, ', ')            // Replace newlines with commas
-      .trim();
-  }
-  // Fallback: Check parent component set description (for component sets)
-  else if (firstComponent.parent && firstComponent.parent.type === 'COMPONENT_SET') {
-    const componentSet = firstComponent.parent;
-    if ((componentSet as any).description) {
-      description = (componentSet as any).description;
-    } else if ((componentSet as any).descriptionMarkdown) {
-      const markdownDesc = (componentSet as any).descriptionMarkdown;
-      description = markdownDesc
-        .replace(/\*\*(.*?)\*\*/g, '$1')
-        .replace(/\*(.*?)\*/g, '$1')
-        .replace(/`(.*?)`/g, '$1')
-        .replace(/#{1,6}\s*/g, '')
-        .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-        .replace(/\n/g, ', ')
-        .trim();
-    }
-  }
-  
-  
+  const { categories, tagsString: descriptionTags } = parseDescription(getIconDescription(firstComponent));
+
   // Process tags using the new function
-  let tagsString = description;
+  let tagsString = descriptionTags;
   
   // If no description found, try to extract meaningful tags from the component name
   if (!tagsString && baseName) {
@@ -1051,6 +1177,7 @@ async function processIconGroup(baseName: string, components: ComponentNode[]): 
   return {
     name: toKebabCase(baseName), // Convert to kebab-case
     tags,
+    categories,
     variants
   };
 }
@@ -1242,13 +1369,17 @@ async function runPreChecks(): Promise<{
   allComponentsToCheck.push(...individualComponents);
 
   // Resize window to accommodate checklist
-  figma.ui.resize(280, 392);
+  figma.ui.resize(280, 432);
 
   // Run all pre-checks sequentially
   const checks = [
     { 
       metadata: PRE_CHECK_METADATA.duplicateNames,
       run: () => runDuplicateNamesCheck(componentSets, components, componentSetChildIds)
+    },
+    { 
+      metadata: PRE_CHECK_METADATA.categories,
+      run: () => runCategoriesCheck(componentSets, individualComponents)
     },
     { 
       metadata: PRE_CHECK_METADATA.layerNames,

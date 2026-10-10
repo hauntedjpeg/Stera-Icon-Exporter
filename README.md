@@ -27,6 +27,7 @@ npm run build
    - Navigate to the page with your icon components
    - Name your components (e.g., `arrow-left`, `bubble`)
    - Add descriptions with comma-separated tags (optional)
+   - Optionally start the description with up to 3 categories in brackets, e.g. `[navigation, arrows] arrow, direction, right`. Categories are lowercase kebab-case and the first one is the primary.
 
 2. **Export**:
    - Run the plugin in Figma
@@ -46,6 +47,7 @@ The plugin generates a single JSON file with this structure:
     {
       "name": "arrow-right",
       "tags": ["arrow", "direction", "navigation", "right"],
+      "categories": ["navigation", "arrows"],
       "variants": [
         {
           "variant": {
@@ -85,6 +87,7 @@ The plugin generates a single JSON file with this structure:
 - **`icons`**: Array of icon objects, sorted alphabetically by name
 - **`name`**: Kebab-case icon name (e.g., "arrow-right")
 - **`tags`**: Array of lowercase, deduped, alphabetized tags
+- **`categories`**: Array of lowercase categories from the leading `[...]` in the description, in authored order (first is primary); `[]` when none
 - **`variants`**: Array of variant objects, sorted by weight then duotone
 - **`variant.weight`**: One of `"Regular"`, `"Bold"`, or `"Fill"`
 - **`variant.duotone`**: Boolean (`true` or `false`)
