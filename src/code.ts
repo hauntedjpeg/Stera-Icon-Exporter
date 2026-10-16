@@ -303,24 +303,24 @@ function processTags(tagsString: string): string[] {
 }
 
 /**
- * Splits a description into its leading [category, ...] list and the remaining tag string.
+ * Splits a description into its trailing [category, ...] list and the preceding tag string.
  * Category order is preserved because the first one is the primary.
  */
 function parseDescription(description: string): { categories: string[]; tagsString: string } {
   const trimmed = (description || '').trim();
-  const closeIndex = trimmed.indexOf(']');
+  const openIndex = trimmed.lastIndexOf('[');
 
-  if (!trimmed.startsWith('[') || closeIndex === -1) {
+  if (!trimmed.endsWith(']') || openIndex === -1) {
     return { categories: [], tagsString: trimmed };
   }
 
   const categories = trimmed
-    .slice(1, closeIndex)
+    .slice(openIndex + 1, -1)
     .split(',')
     .map(category => category.trim().toLowerCase())
     .filter(category => category.length > 0);
 
-  return { categories, tagsString: trimmed.slice(closeIndex + 1).trim() };
+  return { categories, tagsString: trimmed.slice(0, openIndex).trim() };
 }
 
 /**
@@ -331,18 +331,20 @@ function findCategoryProblem(description: string): string | null {
   const trimmed = (description || '').trim();
   const hasBracket = (value: string) => value.includes('[') || value.includes(']');
 
-  if (!trimmed.startsWith('[')) {
-    return hasBracket(trimmed) ? 'brackets must be at the very start' : null;
+  const openIndex = trimmed.lastIndexOf('[');
+
+  if (!trimmed.endsWith(']')) {
+    if (!hasBracket(trimmed)) return null;
+    return openIndex > trimmed.lastIndexOf(']') ? 'missing closing ]' : 'brackets must be at the very end';
   }
 
-  const closeIndex = trimmed.indexOf(']');
-  if (closeIndex === -1) {
-    return 'missing closing ]';
+  if (openIndex === -1) {
+    return 'missing opening [';
   }
 
-  const inner = trimmed.slice(1, closeIndex);
-  if (hasBracket(inner) || hasBracket(trimmed.slice(closeIndex + 1))) {
-    return 'brackets must be at the very start';
+  const inner = trimmed.slice(openIndex + 1, -1);
+  if (hasBracket(inner) || hasBracket(trimmed.slice(0, openIndex))) {
+    return 'brackets must be at the very end';
   }
 
   // Validate the raw values (before lowercasing) so uppercase is reported
@@ -752,7 +754,7 @@ function runDuplicateNamesCheck(
 }
 
 /**
- * Pre-check: Verifies the leading [category, ...] list in each icon description is well-formed
+ * Pre-check: Verifies the trailing [category, ...] list in each icon description is well-formed
  */
 function runCategoriesCheck(componentSets: any[], individualComponents: ComponentNode[]): PreCheckResult {
   const offending: Array<{ name: string; id: string }> = [];
@@ -788,7 +790,7 @@ function runCategoriesCheck(componentSets: any[], individualComponents: Componen
 
   const offendingComponents = offending.slice(0, MAX_ERRORS);
   const moreCount = offending.length > MAX_ERRORS ? `(and ${offending.length - MAX_ERRORS} more)` : '';
-  const errorMessage = `Descriptions may start with up to ${MAX_CATEGORIES} lowercase kebab-case categories in [brackets]. Component sets with errors: ${offendingComponents.map(({ name }) => name).join(', ')}${moreCount ? ' ' + moreCount : ''}`;
+  const errorMessage = `Descriptions may end with up to ${MAX_CATEGORIES} lowercase kebab-case categories in [brackets]. Component sets with errors: ${offendingComponents.map(({ name }) => name).join(', ')}${moreCount ? ' ' + moreCount : ''}`;
 
   return {
     checkId: PRE_CHECK_METADATA.categories.checkId,
